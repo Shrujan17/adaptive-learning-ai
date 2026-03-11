@@ -103,15 +103,16 @@ export default function App() {
   const notify = (m, err=false) => { setToast({m,err}); setTimeout(()=>setToast(null),3000) }
 
   const login = async () => {
-    try {
-      setLoading(true)
-      setMsg('Redirecting to Google...')
-      await signInWithRedirect(auth, provider)
-    } catch(e) {
-      notify('Sign-in failed. Try again.', true)
-      setLoading(false)
-    }
+  try {
+    console.log('Login clicked')
+    console.log('Auth:', auth)
+    console.log('Provider:', provider)
+    await signInWithRedirect(auth, provider)
+  } catch(e) {
+    console.error('Login error:', e)
+    notify(e.message, true)
   }
+}
 
   const logout = async () => { await signOut(auth); setUser(null); setSubs([]); setPage('dash') }
 
