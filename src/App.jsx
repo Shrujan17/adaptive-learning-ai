@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, Legend } from 'recharts'
 import { initializeApp } from 'firebase/app'
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth'
+import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from 'firebase/auth'
 
 // ── FIREBASE ──────────────────────────────────────────────────────────────────
 const firebaseApp = initializeApp({
@@ -83,12 +83,37 @@ export default function App() {
   const [loading,setLoading] = useState(false)
   const [msg,setMsg]         = useState('')
   const [toast,setToast]     = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
 
-  useEffect(() => { return onAuthStateChanged(auth, setUser) }, [])
+  useEffect(() => {
+    // Handle redirect result when page loads
+    getRedirectResult(auth)
+      .then(result => { if (result?.user) setUser(result.user) })
+      .catch(err => console.error('Redirect error:', err))
+      .finally(() => setAuthLoading(false))
+
+    // Listen for auth state changes
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u)
+      setAuthLoading(false)
+    })
+    return unsub
+  }, [])
 
   const notify = (m, err=false) => { setToast({m,err}); setTimeout(()=>setToast(null),3000) }
-  const login  = async () => { try { await signInWithPopup(auth,provider) } catch { notify('Sign-in failed. Check Firebase config.',true) } }
-  const logout = async () => { await signOut(auth); setSubs([]); setPage('dash') }
+
+  const login = async () => {
+    try {
+      setLoading(true)
+      setMsg('Redirecting to Google...')
+      await signInWithRedirect(auth, provider)
+    } catch(e) {
+      notify('Sign-in failed. Try again.', true)
+      setLoading(false)
+    }
+  }
+
+  const logout = async () => { await signOut(auth); setUser(null); setSubs([]); setPage('dash') }
 
   const upload = async (file, name) => {
     setLoading(true); setMsg('📖 Reading document...')
@@ -101,7 +126,7 @@ export default function App() {
       const parsed = parseJSON(raw)
       setSubs(p => [...p, { id:Date.now(), name, summary, rawText:text, difficulty:1, avgScore:0, sessions:0, scores:[], quizBank:parsed?.questions||[], lastStudied:null, color:COLORS[p.length%COLORS.length] }])
       notify(`✅ "${name}" added!`); setPage('dash')
-    } catch(e) { notify('❌ Failed — check your Gemini API key.',true) }
+    } catch(e) { notify('❌ Failed — check your Gemini API key.', true) }
     setLoading(false)
   }
 
@@ -113,7 +138,7 @@ export default function App() {
       setActive(sub)
       setQuiz({ questions: parsed?.questions||sub.quizBank||[], current:0, answers:[], showHint:false, timeLeft:30, done:false })
       setPage('quiz')
-    } catch(e) { notify('❌ Quiz failed — check Gemini API key.',true) }
+    } catch(e) { notify('❌ Quiz failed — check Gemini API key.', true) }
     setLoading(false)
   }
 
@@ -132,16 +157,28 @@ export default function App() {
     setQuiz(q => ({...q, done:true, finalScore:pct, correct}))
   }, [active])
 
+  // Show loading spinner while checking auth
+  if (authLoading) return (
+    <div style={{minHeight:'100vh',background:'#07090F',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:16}}>
+      <style>{CSS}</style>
+      <div style={{width:52,height:52,border:'3px solid #1C2A40',borderTop:'3px solid #00C8FF',borderRadius:'50%'}} className="spin"/>
+      <p style={{color:'#00C8FF',fontWeight:600,fontSize:15,fontFamily:"'Plus Jakarta Sans',sans-serif"}}>Loading AdaptLearn AI...</p>
+    </div>
+  )
+
   if (!user) return <Login onLogin={login}/>
 
   return (
     <div style={{minHeight:'100vh',background:'var(--bg)',color:'var(--text)',fontFamily:"'Plus Jakarta Sans',sans-serif"}}>
       <style>{CSS}</style>
+
       {toast && <div style={{position:'fixed',top:18,right:18,zIndex:9999,background:toast.err?'var(--err)':'var(--a3)',color:'#fff',padding:'12px 20px',borderRadius:12,fontWeight:600,boxShadow:'0 8px 32px #0008',animation:'fadeUp 0.3s ease',fontSize:14}}>{toast.m}</div>}
+
       {loading && <div style={{position:'fixed',inset:0,background:'rgba(7,9,15,0.93)',zIndex:9998,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:18}}>
         <div style={{width:52,height:52,border:'3px solid var(--border)',borderTop:'3px solid var(--accent)',borderRadius:'50%'}} className="spin"/>
         <p style={{color:'var(--accent)',fontWeight:600,fontSize:15}}>{msg}</p>
       </div>}
+
       <nav style={{background:'var(--surface)',borderBottom:'1px solid var(--border)',padding:'0 28px',display:'flex',alignItems:'center',justifyContent:'space-between',height:62,position:'sticky',top:0,zIndex:100}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
           <div style={{width:34,height:34,background:'linear-gradient(135deg,var(--accent),var(--a2))',borderRadius:9,display:'flex',alignItems:'center',justifyContent:'center',fontSize:17}}>🎓</div>
@@ -153,11 +190,15 @@ export default function App() {
           ))}
         </div>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
-          {user.photoURL?<img src={user.photoURL} alt="" style={{width:34,height:34,borderRadius:'50%',border:'2px solid var(--border)'}}/>:<div style={{width:34,height:34,background:'linear-gradient(135deg,var(--a2),var(--accent))',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:13}}>{user.displayName?.[0]||'?'}</div>}
+          {user.photoURL
+            ? <img src={user.photoURL} alt="" style={{width:34,height:34,borderRadius:'50%',border:'2px solid var(--border)'}}/>
+            : <div style={{width:34,height:34,background:'linear-gradient(135deg,var(--a2),var(--accent))',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:13}}>{user.displayName?.[0]||'?'}</div>
+          }
           <span style={{fontSize:13,color:'var(--muted)'}}>{user.displayName?.split(' ')[0]}</span>
           <button className="btn" onClick={logout} style={{padding:'6px 12px',background:'rgba(239,68,68,0.1)',color:'var(--err)',fontSize:12,border:'1px solid rgba(239,68,68,0.25)'}}>Sign Out</button>
         </div>
       </nav>
+
       <main style={{maxWidth:1180,margin:'0 auto',padding:'36px 24px'}}>
         {page==='dash'     && <Dashboard subs={subs} onQuiz={startQuiz} onUpload={()=>setPage('upload')}/>}
         {page==='upload'   && <Upload onUpload={upload}/>}
@@ -187,7 +228,12 @@ function Login({onLogin}) {
           </div>
         ))}
         <button className="btn" onClick={onLogin} style={{marginTop:24,width:'100%',padding:15,background:'#fff',color:'#111',borderRadius:12,fontSize:15,display:'flex',alignItems:'center',justifyContent:'center',gap:12,fontFamily:"'Plus Jakarta Sans',sans-serif",fontWeight:700}}>
-          <svg width="20" height="20" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+          <svg width="20" height="20" viewBox="0 0 24 24">
+            <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+            <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+            <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+            <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+          </svg>
           Continue with Google
         </button>
         <p style={{marginTop:12,fontSize:11,color:'var(--muted)'}}>Powered by Gemini 2.0 Flash · Firebase Auth</p>
