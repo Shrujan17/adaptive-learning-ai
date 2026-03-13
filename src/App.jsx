@@ -3,8 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, Legend } from 'recharts'
 
 // ── GEMINI ────────────────────────────────────────────────────────────────────
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY}`
-
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=...`
 async function callGemini(prompt) {
   const res = await fetch(GEMINI_URL, {
     method: 'POST',
