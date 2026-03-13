@@ -36,8 +36,7 @@ async function loadSubsFromFirestore(userId) {
 
 // ── GEMINI ────────────────────────────────────────────────────────────────────
 const GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`
-
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`;
 async function callGemini(prompt, retries = 3) {
   for (let attempt = 0; attempt < retries; attempt++) {
     const res = await fetch(GEMINI_URL, {
