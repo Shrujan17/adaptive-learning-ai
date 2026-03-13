@@ -1,9 +1,42 @@
 import { createRoot } from 'react-dom/client'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, Legend } from 'recharts'
+import { initializeApp } from 'firebase/app'
+import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore'
+
+// ── FIREBASE ──────────────────────────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyBczNO5ljGpSIvdfBWcYIqXnTGL7hooD7s",
+  authDomain: "adaptive-learning-ais.firebaseapp.com",
+  projectId: "adaptive-learning-ais",
+  storageBucket: "adaptive-learning-ais.firebasestorage.app",
+  messagingSenderId: "301820783097",
+  appId: "1:301820783097:web:dcb6d9e7c1e157925bb528",
+  measurementId: "G-VSDQN8C5SW"
+}
+const firebaseApp = initializeApp(firebaseConfig)
+const db = getFirestore(firebaseApp)
+
+const USER_ID = 'demo-student'
+
+async function saveSubsToFirestore(subs) {
+  try {
+    await setDoc(doc(db, 'users', USER_ID), { subjects: subs, updatedAt: new Date().toISOString() })
+  } catch (e) { console.error('Firestore save error:', e) }
+}
+
+async function loadSubsFromFirestore() {
+  try {
+    const snap = await getDoc(doc(db, 'users', USER_ID))
+    if (snap.exists()) return snap.data().subjects || []
+  } catch (e) { console.error('Firestore load error:', e) }
+  return []
+}
 
 // ── GEMINI ────────────────────────────────────────────────────────────────────
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=...`
+const GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`
+
 async function callGemini(prompt) {
   const res = await fetch(GEMINI_URL, {
     method: 'POST',
@@ -63,25 +96,40 @@ createRoot(document.getElementById('root')).render(<App />)
 
 // ── APP ───────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [user,setUser]             = useState(null)
-  const [page,setPage]             = useState('dash')
-  const [subs,setSubs]             = useState([])
-  const [active,setActive]         = useState(null)
-  const [quiz,setQuiz]             = useState(null)
-  const [loading,setLoading]       = useState(false)
-  const [msg,setMsg]               = useState('')
-  const [toast,setToast]           = useState(null)
+  const [user,setUser]               = useState(null)
+  const [page,setPage]               = useState('dash')
+  const [subs,setSubs]               = useState([])
+  const [active,setActive]           = useState(null)
+  const [quiz,setQuiz]               = useState(null)
+  const [loading,setLoading]         = useState(false)
+  const [msg,setMsg]                 = useState('')
+  const [toast,setToast]             = useState(null)
   const [authLoading,setAuthLoading] = useState(true)
+  const [dbLoading,setDbLoading]     = useState(false)
 
   useEffect(() => { setAuthLoading(false) }, [])
 
-  const notify = (m, err=false) => { setToast({m,err}); setTimeout(()=>setToast(null),3000) }
+  // Auto-save to Firestore whenever subs change
+  useEffect(() => {
+    if (user && subs.length >= 0) saveSubsToFirestore(subs)
+  }, [subs, user])
 
-  const login = () => {
-    setUser({ displayName:'Student', email:'student@gmail.com', photoURL:null })
+  const notify = (m, err=false) => { setToast({m,err}); setTimeout(()=>setToast(null),3500) }
+
+  const login = async () => {
+    const u = { displayName:'Student', email:'student@gmail.com', photoURL:null }
+    setUser(u)
+    setDbLoading(true)
+    const saved = await loadSubsFromFirestore()
+    setSubs(saved)
+    setDbLoading(false)
+    if (saved.length > 0) notify(`☁️ Loaded ${saved.length} subject${saved.length>1?'s':''} from cloud!`)
   }
 
-  const logout = () => { setUser(null); setSubs([]); setPage('dash') }
+  const logout = () => {
+    setUser(null); setSubs([]); setPage('dash')
+    notify('👋 Signed out. Your data is saved to the cloud.')
+  }
 
   const upload = async (file, name) => {
     setLoading(true); setMsg('📖 Reading document...')
@@ -93,14 +141,17 @@ export default function App() {
       const raw = await callGemini(`You are an adaptive quiz generator. Return ONLY raw JSON — no markdown, no backticks, no explanation.\nGenerate 5 multiple-choice questions at EASY difficulty.\nFormat: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"hint":"...","explanation":"..."}]}\n"answer" is the 0-based index (0-3) of the correct option.\nSubject: ${name}\nSummary: ${summary}`)
       const parsed = parseJSON(raw)
       setSubs(p => [...p, {
-        id:Date.now(), name, summary, rawText:text,
-        difficulty:1, avgScore:0, sessions:0, scores:[],
-        quizBank:parsed?.questions||[], lastStudied:null,
-        color:COLORS[p.length%COLORS.length]
+        id: Date.now(), name, summary, rawText: text,
+        difficulty: 1, avgScore: 0, sessions: 0, scores: [],
+        quizBank: parsed?.questions || [], lastStudied: null,
+        color: COLORS[p.length % COLORS.length]
       }])
-      notify(`✅ "${name}" added!`)
+      notify(`✅ "${name}" added & saved to cloud!`)
       setPage('dash')
-    } catch(e) { notify('❌ Failed — check your Gemini API key.', true) }
+    } catch(e) {
+      console.error(e)
+      notify('❌ Failed — ' + (e.message || 'check your Gemini API key.'), true)
+    }
     setLoading(false)
   }
 
@@ -110,26 +161,34 @@ export default function App() {
       const raw = await callGemini(`You are an adaptive quiz generator. Return ONLY raw JSON — no markdown, no backticks.\nGenerate 6 multiple-choice questions at difficulty ${sub.difficulty} (${DIFFS[sub.difficulty]}).\nFormat: {"questions":[{"q":"...","options":["A","B","C","D"],"answer":0,"hint":"...","explanation":"..."}]}\nSubject: ${sub.name}\nContent: ${sub.rawText?.slice(0,6000)||sub.summary}`)
       const parsed = parseJSON(raw)
       setActive(sub)
-      setQuiz({ questions:parsed?.questions||sub.quizBank||[], current:0, answers:[], showHint:false, timeLeft:30, done:false })
+      setQuiz({ questions: parsed?.questions || sub.quizBank || [], current: 0, answers: [], showHint: false, timeLeft: 30, done: false })
       setPage('quiz')
-    } catch(e) { notify('❌ Quiz failed — check Gemini API key.', true) }
+    } catch(e) {
+      console.error(e)
+      notify('❌ Quiz failed — ' + (e.message || 'check Gemini API key.'), true)
+    }
     setLoading(false)
   }
 
   const finishQuiz = useCallback((answers, questions) => {
-    const correct = answers.filter((a,i) => a===questions[i]?.answer).length
-    const pct     = Math.round((correct/questions.length)*100)
+    const correct = answers.filter((a,i) => a === questions[i]?.answer).length
+    const pct     = Math.round((correct / questions.length) * 100)
     setSubs(p => p.map(s => {
       if (s.id !== active?.id) return s
-      const scores = [...(s.scores||[]), pct]
-      const avg    = Math.round(scores.reduce((a,b)=>a+b,0)/scores.length)
+      const scores = [...(s.scores || []), pct]
+      const avg    = Math.round(scores.reduce((a,b) => a+b, 0) / scores.length)
       let d = s.difficulty
-      if (pct>=80 && d<4) d++
-      if (pct<50  && d>1) d--
-      return {...s, scores, avgScore:avg, sessions:(s.sessions||0)+1, difficulty:d, lastStudied:new Date().toLocaleDateString()}
+      if (pct >= 80 && d < 4) d++
+      if (pct < 50  && d > 1) d--
+      return { ...s, scores, avgScore: avg, sessions: (s.sessions||0)+1, difficulty: d, lastStudied: new Date().toLocaleDateString() }
     }))
-    setQuiz(q => ({...q, done:true, finalScore:pct, correct}))
+    setQuiz(q => ({ ...q, done: true, finalScore: pct, correct }))
   }, [active])
+
+  const deleteSub = (id) => {
+    setSubs(p => p.filter(s => s.id !== id))
+    notify('🗑 Subject deleted.')
+  }
 
   if (authLoading) return (
     <div style={{minHeight:'100vh',background:'#07090F',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:16}}>
@@ -140,6 +199,14 @@ export default function App() {
   )
 
   if (!user) return <Login onLogin={login}/>
+
+  if (dbLoading) return (
+    <div style={{minHeight:'100vh',background:'#07090F',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:16}}>
+      <style>{CSS}</style>
+      <div style={{width:52,height:52,border:'3px solid #1C2A40',borderTop:'3px solid #00C8FF',borderRadius:'50%'}} className="spin"/>
+      <p style={{color:'#00C8FF',fontWeight:600,fontSize:15,fontFamily:"'Plus Jakarta Sans',sans-serif"}}>☁️ Loading your data from cloud...</p>
+    </div>
+  )
 
   return (
     <div style={{minHeight:'100vh',background:'var(--bg)',color:'var(--text)',fontFamily:"'Plus Jakarta Sans',sans-serif"}}>
@@ -164,6 +231,10 @@ export default function App() {
           ))}
         </div>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div style={{display:'flex',alignItems:'center',gap:5,padding:'4px 10px',background:'rgba(16,185,129,0.1)',borderRadius:20,border:'1px solid rgba(16,185,129,0.25)'}}>
+            <span style={{width:6,height:6,borderRadius:'50%',background:'var(--a3)',display:'inline-block'}}/>
+            <span style={{fontSize:11,color:'var(--a3)',fontWeight:600}}>Cloud Sync</span>
+          </div>
           {user.photoURL
             ? <img src={user.photoURL} alt="" style={{width:34,height:34,borderRadius:'50%',border:'2px solid var(--border)'}}/>
             : <div style={{width:34,height:34,background:'linear-gradient(135deg,var(--a2),var(--accent))',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:13}}>
@@ -176,7 +247,7 @@ export default function App() {
       </nav>
 
       <main style={{maxWidth:1180,margin:'0 auto',padding:'36px 24px'}}>
-        {page==='dash'     && <Dashboard subs={subs} onQuiz={startQuiz} onUpload={()=>setPage('upload')}/>}
+        {page==='dash'     && <Dashboard subs={subs} onQuiz={startQuiz} onUpload={()=>setPage('upload')} onDelete={deleteSub}/>}
         {page==='upload'   && <Upload onUpload={upload}/>}
         {page==='schedule' && <Schedule subs={subs}/>}
         {page==='progress' && <Progress subs={subs}/>}
@@ -198,13 +269,11 @@ function Login({onLogin}) {
         <div style={{width:72,height:72,background:'linear-gradient(135deg,var(--accent),var(--a2))',borderRadius:20,display:'flex',alignItems:'center',justifyContent:'center',fontSize:34,margin:'0 auto 22px'}}>🎓</div>
         <h1 style={{fontFamily:"'Syne',sans-serif",fontSize:34,fontWeight:800,background:'linear-gradient(135deg,var(--accent),var(--a2))',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',marginBottom:8}}>AdaptLearn AI</h1>
         <p style={{color:'var(--muted)',fontSize:14,marginBottom:28,lineHeight:1.7}}>Upload any textbook · Gemini generates adaptive quizzes · Track mastery</p>
-
-        {[['📄','PDF, Word & PowerPoint support'],['🧠','Gemini 2.0 Flash AI quiz generation'],['📈','Auto-scaling Easy → Expert difficulty'],['🔁','Spaced repetition for weak topics'],['📅','Smart weekly study timetable'],['📊','Progress charts & analytics']].map(([i,l])=>(
+        {[['📄','PDF, Word & PowerPoint support'],['🧠','Gemini 1.5 Flash AI quiz generation'],['📈','Auto-scaling Easy → Expert difficulty'],['🔁','Spaced repetition for weak topics'],['📅','Smart weekly study timetable'],['☁️','Cloud sync — data never lost']].map(([i,l])=>(
           <div key={l} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',background:'rgba(0,200,255,0.05)',borderRadius:10,border:'1px solid rgba(0,200,255,0.13)',marginBottom:8,textAlign:'left',fontSize:13}}>
             <span style={{fontSize:16}}>{i}</span><span>{l}</span>
           </div>
         ))}
-
         <button className="btn" onClick={onLogin} style={{marginTop:24,width:'100%',padding:15,background:'#fff',color:'#111',borderRadius:12,fontSize:15,display:'flex',alignItems:'center',justifyContent:'center',gap:12,fontFamily:"'Plus Jakarta Sans',sans-serif",fontWeight:700}}>
           <svg width="20" height="20" viewBox="0 0 24 24">
             <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
@@ -214,14 +283,14 @@ function Login({onLogin}) {
           </svg>
           Continue with Google
         </button>
-        <p style={{marginTop:12,fontSize:11,color:'var(--muted)'}}>Powered by Gemini 2.0 Flash</p>
+        <p style={{marginTop:12,fontSize:11,color:'var(--muted)'}}>Powered by Gemini 1.5 Flash · Data saved to Firestore</p>
       </div>
     </div>
   )
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
-function Dashboard({subs,onQuiz,onUpload}) {
+function Dashboard({subs,onQuiz,onUpload,onDelete}) {
   const total = subs.reduce((a,s)=>a+(s.sessions||0),0)
   const avg   = subs.length ? Math.round(subs.reduce((a,s)=>a+(s.avgScore||0),0)/subs.length) : 0
   const wData = DAYS.map((d,i)=>({day:d,min:subs.reduce((a,s)=>(s.sessions||0)>i?a+35:a,0)}))
@@ -229,10 +298,8 @@ function Dashboard({subs,onQuiz,onUpload}) {
     <div className="fade">
       <div style={{marginBottom:28}}>
         <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:30,fontWeight:800,marginBottom:6}}>Dashboard 👋</h2>
-        <p style={{color:'var(--muted)',fontSize:14}}>{subs.length} subject{subs.length!==1?'s':''} · Gemini-powered adaptive learning</p>
+        <p style={{color:'var(--muted)',fontSize:14}}>{subs.length} subject{subs.length!==1?'s':''} · Gemini-powered adaptive learning · ☁️ Cloud synced</p>
       </div>
-
-      {/* STATS */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:28}}>
         {[['📚','Subjects',subs.length,'var(--accent)'],['🎯','Sessions',total,'var(--a2)'],['⭐','Avg Score',`${avg}%`,'var(--a3)'],['🔥','Streak','7d','var(--warn)']].map(([icon,label,val,c])=>(
           <div key={label} className="card" style={{padding:20}}>
@@ -242,8 +309,6 @@ function Dashboard({subs,onQuiz,onUpload}) {
           </div>
         ))}
       </div>
-
-      {/* SUBJECT CARDS */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))',gap:14,marginBottom:28}}>
         {subs.length===0?(
           <div className="card" style={{padding:56,textAlign:'center',gridColumn:'1/-1'}}>
@@ -258,7 +323,10 @@ function Dashboard({subs,onQuiz,onUpload}) {
             onMouseOut={e=>e.currentTarget.style.transform='translateY(0)'}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}>
               <h3 style={{fontWeight:700,fontSize:15,flex:1,marginRight:8,lineHeight:1.3}}>{s.name}</h3>
-              <span style={{padding:'3px 9px',background:`${DCOL[s.difficulty]}22`,color:DCOL[s.difficulty],borderRadius:20,fontSize:11,fontWeight:700,flexShrink:0}}>{DIFFS[s.difficulty]}</span>
+              <div style={{display:'flex',gap:6,alignItems:'center'}}>
+                <span style={{padding:'3px 9px',background:`${DCOL[s.difficulty]}22`,color:DCOL[s.difficulty],borderRadius:20,fontSize:11,fontWeight:700,flexShrink:0}}>{DIFFS[s.difficulty]}</span>
+                <button className="btn" onClick={()=>onDelete(s.id)} title="Delete" style={{padding:'3px 7px',background:'rgba(239,68,68,0.1)',color:'var(--err)',fontSize:12,border:'1px solid rgba(239,68,68,0.2)'}}>🗑</button>
+              </div>
             </div>
             <p style={{color:'var(--muted)',fontSize:12,marginBottom:14,lineHeight:1.6,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{s.summary?.slice(0,120)}...</p>
             <div style={{display:'flex',gap:14,marginBottom:14,fontSize:12,color:'var(--muted)'}}>
@@ -273,8 +341,6 @@ function Dashboard({subs,onQuiz,onUpload}) {
           </div>
         ))}
       </div>
-
-      {/* WEEKLY CHART */}
       {wData.some(d=>d.min>0)&&(
         <div className="card" style={{padding:24}}>
           <h3 style={{fontFamily:"'Syne',sans-serif",fontSize:15,marginBottom:18}}>📊 Weekly Activity</h3>
@@ -370,8 +436,11 @@ function Quiz({sub,state,setState,onFinish,onBack}) {
           <div style={{width:120,height:120,borderRadius:'50%',background:`conic-gradient(${col} ${pct*3.6}deg,var(--border) 0deg)`,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 28px'}}>
             <div style={{width:88,height:88,borderRadius:'50%',background:'var(--card)',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"'Syne',sans-serif",fontSize:26,fontWeight:800}}>{pct}%</div>
           </div>
-          <div style={{padding:14,background:'rgba(0,200,255,0.06)',borderRadius:12,border:'1px solid rgba(0,200,255,0.15)',marginBottom:28,fontSize:14,color:'var(--muted)',lineHeight:1.6}}>
+          <div style={{padding:14,background:'rgba(0,200,255,0.06)',borderRadius:12,border:'1px solid rgba(0,200,255,0.15)',marginBottom:16,fontSize:14,color:'var(--muted)',lineHeight:1.6}}>
             {newD>sub.difficulty?`🚀 Difficulty increased → ${DIFFS[newD]}!`:newD<sub.difficulty?`📉 Adjusted to ${DIFFS[newD]} for better learning`:`✅ Staying at ${DIFFS[sub.difficulty]}`}
+          </div>
+          <div style={{padding:12,background:'rgba(16,185,129,0.08)',borderRadius:12,border:'1px solid rgba(16,185,129,0.2)',marginBottom:28,fontSize:13,color:'var(--a3)'}}>
+            ☁️ Results saved to cloud automatically
           </div>
           <button className="btn" onClick={onBack} style={{width:'100%',padding:13,background:'linear-gradient(135deg,var(--accent),var(--a2))',color:'#fff',fontSize:14}}>← Back to Dashboard</button>
         </div>
@@ -393,17 +462,13 @@ function Quiz({sub,state,setState,onFinish,onBack}) {
           {state.timeLeft}
         </div>
       </div>
-
       <div style={{height:4,background:'var(--border)',borderRadius:2,marginBottom:22}}>
         <div style={{height:'100%',width:`${(current/questions.length)*100}%`,background:'linear-gradient(90deg,var(--accent),var(--a2))',borderRadius:2,transition:'width 0.5s ease'}}/>
       </div>
-
       <span style={{padding:'4px 12px',background:`${DCOL[sub.difficulty]}22`,color:DCOL[sub.difficulty],borderRadius:20,fontSize:12,fontWeight:700,display:'inline-block',marginBottom:16}}>{DIFFS[sub.difficulty]} Mode</span>
-
       <div className="card" style={{padding:26,marginBottom:16}}>
         <p style={{fontSize:17,fontWeight:600,lineHeight:1.65}}>{q.q}</p>
       </div>
-
       <div style={{display:'flex',flexDirection:'column',gap:10,marginBottom:16}}>
         {q.options?.map((opt,i)=>(
           <button key={i} className="btn" onClick={()=>answer(i)}
@@ -417,7 +482,6 @@ function Quiz({sub,state,setState,onFinish,onBack}) {
           </button>
         ))}
       </div>
-
       <div style={{display:'flex',gap:10}}>
         <button className="btn" onClick={()=>setState(s=>({...s,showHint:!s.showHint}))} style={{flex:1,padding:9,background:'rgba(245,158,11,0.1)',color:'var(--warn)',border:'1px solid rgba(245,158,11,0.25)',fontSize:13}}>
           💡 {showHint?'Hide':'Show'} Hint
@@ -426,7 +490,6 @@ function Quiz({sub,state,setState,onFinish,onBack}) {
           ⏭ Skip
         </button>
       </div>
-
       {showHint&&q.hint&&(
         <div style={{marginTop:14,padding:15,background:'rgba(245,158,11,0.06)',borderRadius:12,border:'1px solid rgba(245,158,11,0.2)',fontSize:14,color:'var(--warn)',lineHeight:1.6}}>
           💡 <strong>Hint:</strong> {q.hint}
@@ -451,7 +514,7 @@ function Schedule({subs}) {
   return(
     <div className="fade">
       <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:28,fontWeight:800,marginBottom:6}}>📅 Weekly Schedule</h2>
-      <p style={{color:'var(--muted)',marginBottom:28,fontSize:14}}>AI-generated plan with spaced repetition</p>
+      <p style={{color:'var(--muted)',marginBottom:28,fontSize:14}}>AI-generated plan with spaced repetition · ☁️ Saved to cloud</p>
       <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:10,marginBottom:28}}>
         {sched.map(({day,slots})=>(
           <div key={day} className="card" style={{padding:14,minHeight:170}}>
@@ -511,7 +574,7 @@ function Progress({subs}) {
   return(
     <div className="fade">
       <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:28,fontWeight:800,marginBottom:6}}>📊 Progress Analytics</h2>
-      <p style={{color:'var(--muted)',marginBottom:28,fontSize:14}}>Performance breakdown across all subjects</p>
+      <p style={{color:'var(--muted)',marginBottom:28,fontSize:14}}>Performance breakdown across all subjects · ☁️ Cloud synced</p>
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20,marginBottom:20}}>
         <div className="card" style={{padding:24}}>
           <h3 style={{fontFamily:"'Syne',sans-serif",fontSize:14,marginBottom:18}}>📈 Average Score by Subject</h3>
